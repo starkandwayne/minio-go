@@ -19,15 +19,13 @@
 package main
 
 import (
-	"log"
-	"net/url"
-	"time"
+	"fmt"
 
 	"github.com/minio/minio-go"
 )
 
 func main() {
-	// Note: YOUR-ACCESSKEYID, YOUR-SECRETACCESSKEY, my-bucketname and my-objectname
+	// Note: YOUR-ACCESSKEYID, YOUR-SECRETACCESSKEY, my-bucketname and my-prefixname
 	// are dummy values, please replace them with original values.
 
 	// Requests are always secure (HTTPS) by default. Set secure=false to enable insecure (HTTP) access.
@@ -37,17 +35,42 @@ func main() {
 	// determined based on the Endpoint value.
 	s3Client, err := minio.New("s3.amazonaws.com", "YOUR-ACCESSKEYID", "YOUR-SECRETACCESSKEY", true)
 	if err != nil {
-		log.Fatalln(err)
+		fmt.Println(err)
+		return
 	}
 
-	// Set request parameters
-	reqParams := make(url.Values)
-	reqParams.Set("response-content-disposition", "attachment; filename=\"your-filename.txt\"")
+	// List 'N' number of objects from a bucket-name with a matching prefix.
+	listObjectsN := func(bucket, prefix string, recursive bool, N int) (objsInfo []minio.ObjectInfo, err error) {
+		// Create a done channel to control 'ListObjects' go routine.
+		doneCh := make(chan struct{}, 1)
 
-	// Gernerate presigned get object url.
-	presignedURL, err := s3Client.PresignedGetObject("my-bucketname", "my-objectname", time.Duration(1000)*time.Second, reqParams)
+		// Free the channel upon return.
+		defer close(doneCh)
+
+		i := 1
+		for object := range s3Client.ListObjects(bucket, prefix, recursive, doneCh) {
+			if object.Err != nil {
+				return nil, object.Err
+			}
+			i++
+			// Verify if we have printed N objects.
+			if i == N {
+				// Indicate ListObjects go-routine to exit and stop
+				// feeding the objectInfo channel.
+				doneCh <- struct{}{}
+			}
+			objsInfo = append(objsInfo, object)
+		}
+		return objsInfo, nil
+	}
+
+	// List recursively first 100 entries for prefix 'my-prefixname'.
+	recursive := true
+	objsInfo, err := listObjectsN("my-bucketname", "my-prefixname", recursive, 100)
 	if err != nil {
-		log.Fatalln(err)
+		fmt.Println(err)
 	}
-	log.Println(presignedURL)
+
+	// Print all the entries.
+	fmt.Println(objsInfo)
 }

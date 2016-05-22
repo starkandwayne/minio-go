@@ -1,5 +1,5 @@
 /*
- * Minio Go Library for Amazon S3 Compatible Cloud Storage (C) 2015 Minio, Inc.
+ * Minio Go Library for Amazon S3 Compatible Cloud Storage (C) 2015, 2016 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,78 +27,94 @@ import (
 	"strings"
 )
 
+// toInt - converts go value to its integer representation based
+// on the value kind if it is an integer.
+func toInt(value reflect.Value) (size int64) {
+	size = -1
+	if value.IsValid() {
+		switch value.Kind() {
+		case reflect.Int:
+			fallthrough
+		case reflect.Int8:
+			fallthrough
+		case reflect.Int16:
+			fallthrough
+		case reflect.Int32:
+			fallthrough
+		case reflect.Int64:
+			size = value.Int()
+		}
+	}
+	return size
+}
+
 // getReaderSize - Determine the size of Reader if available.
 func getReaderSize(reader io.Reader) (size int64, err error) {
-	var result []reflect.Value
 	size = -1
-	if reader != nil {
-		// Verify if there is a method by name 'Size'.
-		lenFn := reflect.ValueOf(reader).MethodByName("Size")
-		if lenFn.IsValid() {
-			if lenFn.Kind() == reflect.Func {
-				// Call the 'Size' function and save its return value.
-				result = lenFn.Call([]reflect.Value{})
-				if result != nil && len(result) == 1 {
-					lenValue := result[0]
-					if lenValue.IsValid() {
-						switch lenValue.Kind() {
-						case reflect.Int:
-							fallthrough
-						case reflect.Int8:
-							fallthrough
-						case reflect.Int16:
-							fallthrough
-						case reflect.Int32:
-							fallthrough
-						case reflect.Int64:
-							size = lenValue.Int()
-						}
+	if reader == nil {
+		return -1, nil
+	}
+	// Verify if there is a method by name 'Size'.
+	sizeFn := reflect.ValueOf(reader).MethodByName("Size")
+	// Verify if there is a method by name 'Len'.
+	lenFn := reflect.ValueOf(reader).MethodByName("Len")
+	if sizeFn.IsValid() {
+		if sizeFn.Kind() == reflect.Func {
+			// Call the 'Size' function and save its return value.
+			result := sizeFn.Call([]reflect.Value{})
+			if len(result) == 1 {
+				size = toInt(result[0])
+			}
+		}
+	} else if lenFn.IsValid() {
+		if lenFn.Kind() == reflect.Func {
+			// Call the 'Len' function and save its return value.
+			result := lenFn.Call([]reflect.Value{})
+			if len(result) == 1 {
+				size = toInt(result[0])
+			}
+		}
+	} else {
+		// Fallback to Stat() method, two possible Stat() structs exist.
+		switch v := reader.(type) {
+		case *os.File:
+			var st os.FileInfo
+			st, err = v.Stat()
+			if err != nil {
+				// Handle this case specially for "windows",
+				// certain files for example 'Stdin', 'Stdout' and
+				// 'Stderr' it is not allowed to fetch file information.
+				if runtime.GOOS == "windows" {
+					if strings.Contains(err.Error(), "GetFileInformationByHandle") {
+						return -1, nil
 					}
 				}
+				return
 			}
-		} else {
-			// Fallback to Stat() method, two possible Stat() structs
-			// exist.
-			switch v := reader.(type) {
-			case *os.File:
-				var st os.FileInfo
-				st, err = v.Stat()
-				if err != nil {
-					// Handle this case specially for "windows",
-					// certain files for example 'Stdin', 'Stdout' and
-					// 'Stderr' it is not allowed to fetch file information.
-					if runtime.GOOS == "windows" {
-						if strings.Contains(err.Error(), "GetFileInformationByHandle") {
-							return -1, nil
-						}
-					}
-					return
-				}
-				// Ignore if input is a directory, throw an error.
-				if st.Mode().IsDir() {
-					return -1, ErrInvalidArgument("Input file cannot be a directory.")
-				}
-				// Ignore 'Stdin', 'Stdout' and 'Stderr', since they
-				// represent *os.File type but internally do not
-				// implement Seekable calls. Ignore them and treat
-				// them like a stream with unknown length.
-				switch st.Name() {
-				case "stdin":
-					fallthrough
-				case "stdout":
-					fallthrough
-				case "stderr":
-					return
-				}
-				size = st.Size()
-			case *Object:
-				var st ObjectInfo
-				st, err = v.Stat()
-				if err != nil {
-					return
-				}
-				size = st.Size
+			// Ignore if input is a directory, throw an error.
+			if st.Mode().IsDir() {
+				return -1, ErrInvalidArgument("Input file cannot be a directory.")
 			}
+			// Ignore 'Stdin', 'Stdout' and 'Stderr', since they
+			// represent *os.File type but internally do not
+			// implement Seekable calls. Ignore them and treat
+			// them like a stream with unknown length.
+			switch st.Name() {
+			case "stdin":
+				fallthrough
+			case "stdout":
+				fallthrough
+			case "stderr":
+				return
+			}
+			size = st.Size()
+		case *Object:
+			var st ObjectInfo
+			st, err = v.Stat()
+			if err != nil {
+				return
+			}
+			size = st.Size
 		}
 	}
 	// Returns the size here.
@@ -146,11 +162,11 @@ func (c Client) putObjectNoChecksum(bucketName, objectName string, reader io.Rea
 
 	// Update progress reader appropriately to the latest offset as we
 	// read from the source.
-	reader = newHook(reader, progress)
+	readSeeker := newHook(reader, progress)
 
 	// This function does not calculate sha256 and md5sum for payload.
 	// Execute put object.
-	st, err := c.putObjectDo(bucketName, objectName, ioutil.NopCloser(reader), nil, nil, size, contentType)
+	st, err := c.putObjectDo(bucketName, objectName, readSeeker, nil, nil, size, contentType)
 	if err != nil {
 		return 0, err
 	}
@@ -178,12 +194,12 @@ func (c Client) putObjectSingle(bucketName, objectName string, reader io.Reader,
 		size = maxSinglePutObjectSize
 	}
 	var md5Sum, sha256Sum []byte
-	var readCloser io.ReadCloser
 	if size <= minPartSize {
 		// Initialize a new temporary buffer.
 		tmpBuffer := new(bytes.Buffer)
 		md5Sum, sha256Sum, size, err = c.hashCopyN(tmpBuffer, reader, size)
-		readCloser = ioutil.NopCloser(tmpBuffer)
+		reader = bytes.NewReader(tmpBuffer.Bytes())
+		tmpBuffer.Reset()
 	} else {
 		// Initialize a new temporary file.
 		var tmpFile *tempFile
@@ -191,12 +207,13 @@ func (c Client) putObjectSingle(bucketName, objectName string, reader io.Reader,
 		if err != nil {
 			return 0, err
 		}
+		defer tmpFile.Close()
 		md5Sum, sha256Sum, size, err = c.hashCopyN(tmpFile, reader, size)
 		// Seek back to beginning of the temporary file.
 		if _, err = tmpFile.Seek(0, 0); err != nil {
 			return 0, err
 		}
-		readCloser = tmpFile
+		reader = tmpFile
 	}
 	// Return error if its not io.EOF.
 	if err != nil {
@@ -204,26 +221,26 @@ func (c Client) putObjectSingle(bucketName, objectName string, reader io.Reader,
 			return 0, err
 		}
 	}
-	// Progress the reader to the size.
-	if progress != nil {
-		if _, err = io.CopyN(ioutil.Discard, progress, size); err != nil {
-			return size, err
-		}
-	}
 	// Execute put object.
-	st, err := c.putObjectDo(bucketName, objectName, readCloser, md5Sum, sha256Sum, size, contentType)
+	st, err := c.putObjectDo(bucketName, objectName, reader, md5Sum, sha256Sum, size, contentType)
 	if err != nil {
 		return 0, err
 	}
 	if st.Size != size {
 		return 0, ErrUnexpectedEOF(st.Size, size, bucketName, objectName)
 	}
+	// Progress the reader to the size if putObjectDo is successful.
+	if progress != nil {
+		if _, err = io.CopyN(ioutil.Discard, progress, size); err != nil {
+			return size, err
+		}
+	}
 	return size, nil
 }
 
 // putObjectDo - executes the put object http operation.
 // NOTE: You must have WRITE permissions on a bucket to add an object to it.
-func (c Client) putObjectDo(bucketName, objectName string, reader io.ReadCloser, md5Sum []byte, sha256Sum []byte, size int64, contentType string) (ObjectInfo, error) {
+func (c Client) putObjectDo(bucketName, objectName string, reader io.Reader, md5Sum []byte, sha256Sum []byte, size int64, contentType string) (ObjectInfo, error) {
 	// Input validation.
 	if err := isValidBucketName(bucketName); err != nil {
 		return ObjectInfo{}, err
@@ -258,13 +275,9 @@ func (c Client) putObjectDo(bucketName, objectName string, reader io.ReadCloser,
 		contentMD5Bytes:    md5Sum,
 		contentSHA256Bytes: sha256Sum,
 	}
-	// Initiate new request.
-	req, err := c.newRequest("PUT", reqMetadata)
-	if err != nil {
-		return ObjectInfo{}, err
-	}
-	// Execute the request.
-	resp, err := c.do(req)
+
+	// Execute PUT an objectName.
+	resp, err := c.executeMethod("PUT", reqMetadata)
 	defer closeResponse(resp)
 	if err != nil {
 		return ObjectInfo{}, err
