@@ -27,7 +27,7 @@ const maxPartsCount = 10000
 
 // maxPartSize - maximum part size 5GiB for a single multipart upload
 // operation.
-const maxPartSize = 1024 * 1024 * 1024 * 5
+var maxPartSize int64 = 1024 * 1024 * 1024 * 5
 
 // maxSinglePutObjectSize - maximum size 5GiB of object per PUT
 // operation.
@@ -40,3 +40,7 @@ const maxMultipartPutObjectSize = 1024 * 1024 * 1024 * 1024 * 5
 // optimalReadBufferSize - optimal buffer 5MiB used for reading
 // through Read operation.
 const optimalReadBufferSize = 1024 * 1024 * 5
+
+func setMaxPartSize(size int64) {
+	maxPartSize = size
+}

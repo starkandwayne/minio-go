@@ -85,6 +85,7 @@ func optimalPartInfo(objectSize int64) (totalPartsCount int, partSize int64, las
 	// overflows during float64 to int64 conversions.
 	partSizeFlt := math.Ceil(float64(objectSize / maxPartsCount))
 	partSizeFlt = math.Ceil(partSizeFlt/minPartSize) * minPartSize
+	partSizeFlt = math.Min(partSizeFlt, float64(maxPartSize))
 	// Total parts count.
 	totalPartsCount = int(math.Ceil(float64(objectSize) / partSizeFlt))
 	// Part size.
