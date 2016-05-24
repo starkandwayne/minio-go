@@ -41,6 +41,6 @@ const maxMultipartPutObjectSize = 1024 * 1024 * 1024 * 1024 * 5
 // through Read operation.
 const optimalReadBufferSize = 1024 * 1024 * 5
 
-func setMaxPartSize(size int64) {
+func SetMaxPartSize(size int64) {
 	maxPartSize = size
 }
